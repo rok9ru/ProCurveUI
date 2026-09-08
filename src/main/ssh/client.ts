@@ -1,7 +1,10 @@
 import { Client, ClientChannel } from 'ssh2';
+import { EventEmitter } from 'events';
 import type { SSHConnectionConfig } from '../../types/ssh.js';
 
-export class SSHClient {
+// Emits 'log' events (raw SSH protocol debug lines and stripped terminal
+// data) so the renderer can show a live SSH log — see ssh:log in index.ts.
+export class SSHClient extends EventEmitter {
   private client: Client | null = null;
   private shellStream: ClientChannel | null = null;
   private isConnected: boolean = false;
@@ -12,11 +15,20 @@ export class SSHClient {
   // Serialize all execute() calls — SSH shell is a single stream, no concurrent commands
   private execQueue: Array<() => void> = [];
   private execRunning: boolean = false;
+  // Login banner (e.g. "ProCurve J9279A Switch 2510G-24") — the only place the
+  // real hardware model appears; `show system`/`show version` never print it.
+  private banner: string = '';
 
   private stripAnsi(str: string): string {
+    // Must consume the leading ESC (0x1B) itself, not just the "[...letter"
+    // part after it — otherwise a stray ESC is left behind wherever a CSI
+    // sequence follows text within the same chunk (e.g. a prompt immediately
+    // followed by a cursor reposition). That leftover byte survives .trim()
+    // (it isn't whitespace), so promptRegex's trailing "#"/">" check can miss
+    // a prompt that arrived just fine — seen in practice on this switch,
+    // which repositions the cursor right after printing its prompt.
     return str
-      .replace(/\[[0-9;]*[a-zA-Z]/g, '')
-      .replace(/\[\?[0-9]*[hl]/g, '')
+      .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
       .replace(/\r/g, '');
   }
 
@@ -58,7 +70,10 @@ export class SSHClient {
         password: config.password,
         readyTimeout: config.readyTimeout || 30000,
         tryKeyboard: config.tryKeyboard || true,
-        debug: (msg: string) => console.log('[SSH DEBUG]', msg),
+        debug: (msg: string) => {
+          console.log('[SSH DEBUG]', msg);
+          this.emit('log', `[SSH] ${msg}`);
+        },
         algorithms: {
           kex: [
             'diffie-hellman-group-exchange-sha1',
@@ -81,22 +96,38 @@ export class SSHClient {
     });
   }
 
-  private openShell(): Promise<ClientChannel> {
+  // The switch's login banner/prompt sequence can simply never arrive (seen in
+  // practice on overloaded/flaky ProCurve units) — without a timeout this left
+  // connect() hanging forever with no error, stuck on "Connecting..." in the UI.
+  private openShell(timeoutMs: number = 20000): Promise<ClientChannel> {
     return new Promise((resolve, reject) => {
       this.client!.shell({ term: 'vt100', cols: 2000, rows: 1000 }, (err, stream) => {
         if (err) return reject(err);
 
         let buffer = '';
+        this.banner = '';
+
+        const timeoutId = setTimeout(() => {
+          stream.removeListener('data', onData);
+          reject(new Error(`Timed out after ${timeoutMs}ms waiting for the switch's shell prompt — it may be slow or unresponsive.`));
+        }, timeoutMs);
+
         const onData = (data: Buffer) => {
-          buffer += this.stripAnsi(data.toString());
+          const chunk = this.stripAnsi(data.toString());
+          this.emit('log', `[DATA] ${chunk}`);
+          buffer += chunk;
 
           if (buffer.includes('Press any key to continue') || buffer.includes('Press any key to configure')) {
+            // The pagination gate's banner text must survive the buffer reset below.
+            this.banner += buffer;
             stream.write('\n');
             buffer = '';
             return;
           }
 
           if (this.promptRegex.test(buffer.trim())) {
+            clearTimeout(timeoutId);
+            this.banner += buffer;
             stream.removeListener('data', onData);
             resolve(stream);
           }
@@ -120,6 +151,10 @@ export class SSHClient {
 
   getConnectionStatus(): boolean {
     return this.isConnected;
+  }
+
+  getBanner(): string {
+    return this.banner;
   }
 
   async execute(command: string, timeout: number = 20000): Promise<string> {
@@ -160,6 +195,7 @@ export class SSHClient {
 
       const onData = (data: Buffer) => {
         const chunk = this.stripAnsi(data.toString());
+        this.emit('log', `[DATA] ${chunk}`);
         buffer += chunk;
         fullOutput += chunk;
 
@@ -187,6 +223,7 @@ export class SSHClient {
       };
 
       this.shellStream!.on('data', onData);
+      this.emit('log', `[SEND] ${command}`);
       this.shellStream!.write(command + '\n');
     });
   }

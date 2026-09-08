@@ -26,6 +26,8 @@ export interface SystemInfo {
   memoryUsagePercent: number;
   cpuUsagePercent?: number;
   ports: { total: number; active: number; inactive: number };
+  defaultGateway?: string;
+  managementVlan?: number;
 }
 
 export interface Vlan {
@@ -35,6 +37,9 @@ export interface Vlan {
   ports: { tagged: string[]; untagged: string[] };
   voice?: boolean;
   jumbo?: boolean;
+  ipConfig?: string;
+  ipAddress?: string;
+  subnetMask?: string;
 }
 
 export interface Port {
@@ -70,6 +75,13 @@ export interface AddPortToVlanCommand {
 export interface RemovePortFromVlanCommand {
   vlanId: number;
   ports: string[];
+}
+
+export interface SetVlanIpCommand {
+  vlanId: number;
+  mode: 'manual' | 'dhcp' | 'disabled';
+  ipAddress?: string;
+  subnetMask?: string;
 }
 
 export interface ConfigurePortCommand {

@@ -11,7 +11,9 @@ try {
         try {
           const url = contents.getURL?.() ?? '';
           if (typeof url === 'string' && url.startsWith('devtools://')) {
-            try { contents.destroy(); } catch (e) { /* ignore */ }
+            // DevTools pages are hosted in their own BrowserWindow; close that window safely.
+            const devtoolsWindow = BrowserWindow.fromWebContents(contents);
+            try { devtoolsWindow?.close(); } catch (e) { /* ignore */ }
           }
         } catch (e) { /* ignore */ }
       });
@@ -27,7 +29,7 @@ import DatabaseManager from './database/db.js';
 import type {
   SSHProfile, SystemInfo, Vlan, Port, AuditLogEntry,
   CreateVlanCommand, ModifyVlanCommand, AddPortToVlanCommand,
-  RemovePortFromVlanCommand, ConfigurePortCommand,
+  RemovePortFromVlanCommand, ConfigurePortCommand, SetVlanIpCommand,
 } from '../types/ipc.js';
 import type { SSHConnectionConfig } from '../types/ssh.js';
 
@@ -44,7 +46,7 @@ function createWindow() {
     ? 'http://localhost:5173'
     : `file://${path.join(__dirname, '../renderer/index.html')}`;
 
-  const iconPath = isDev 
+  const iconPath = isDev
     ? path.join(__dirname, '../../assets/icon.png')
     : path.join(__dirname, '../assets/icon.png');
 
@@ -96,6 +98,9 @@ app.on('ready', () => {
   db = new DatabaseManager();
   db.initialize();
   sshClient = new SSHClient();
+  sshClient.on('log', (line: string) => {
+    mainWindow?.webContents.send('ssh:log', line);
+  });
   createWindow();
   createMenu();
 
@@ -195,7 +200,22 @@ ipcMain.handle('profile:get', (_event, profileId: string) => {
 ipcMain.handle('switch:getSystemInfo', async () => {
   if (!sshClient) throw new Error('SSH not connected');
   const output = await sshClient.execute('show system');
-  const info = ProCurveParser.parseSystemInfo(output);
+  const info = ProCurveParser.parseSystemInfo(output, sshClient.getBanner());
+
+  try {
+    const ipOutput = await sshClient.execute('show ip');
+    info.defaultGateway = ProCurveParser.parseIpService(ipOutput).defaultGateway;
+  } catch (e) {
+    // Keep base info usable if IP service lookup fails.
+  }
+
+  try {
+    const runningConfig = await sshClient.execute('show running-config');
+    info.managementVlan = ProCurveParser.parseManagementVlan(runningConfig);
+  } catch (e) {
+    // Keep base info usable if running-config lookup fails.
+  }
+
   if (currentProfile) db?.addAuditEntry(currentProfile.id, 'show system', JSON.stringify(info), true);
   return info;
 });
@@ -211,13 +231,42 @@ ipcMain.handle('switch:getVlans', async () => {
 ipcMain.handle('switch:getVlanDetail', async (_event, vlanId: number) => {
   if (!sshClient) throw new Error('SSH not connected');
   const output = await sshClient.execute(`show vlan ${vlanId}`);
-  return ProCurveParser.parseVlanDetail(output, vlanId);
+  const vlan = ProCurveParser.parseVlanDetail(output, vlanId);
+
+  // `show vlan <id>` has no IP info; only `show ip` does, keyed by VLAN name.
+  try {
+    const ipOutput = await sshClient.execute('show ip');
+    const match = ProCurveParser.parseIpService(ipOutput).vlans.find(v => v.vlanName === vlan.name);
+    if (match) {
+      vlan.ipConfig = match.ipConfig;
+      vlan.ipAddress = match.ipAddress;
+      vlan.subnetMask = match.subnetMask;
+    }
+  } catch (e) {
+    // Keep base VLAN detail usable if IP service lookup fails.
+  }
+
+  return vlan;
 });
 
 ipcMain.handle('switch:getPorts', async () => {
   if (!sshClient) throw new Error('SSH not connected');
   const output = await sshClient.execute('show interfaces brief');
   const ports = ProCurveParser.parsePorts(output);
+
+  // `show interfaces brief` does not include saved port names on ProCurve,
+  // so enrich with `name` values from running-config.
+  try {
+    const runningConfig = await sshClient.execute('show running-config');
+    const portNames = ProCurveParser.parsePortNamesFromRunningConfig(runningConfig);
+    ports.forEach((port) => {
+      const name = portNames.get(port.id);
+      if (name) port.description = name;
+    });
+  } catch (e) {
+    // Keep base port list usable if running-config retrieval fails.
+  }
+
   if (currentProfile) db?.addAuditEntry(currentProfile.id, 'show interfaces brief', `${ports.length} ports`, true);
   return ports;
 });
@@ -225,7 +274,18 @@ ipcMain.handle('switch:getPorts', async () => {
 ipcMain.handle('switch:getPortDetails', async (_event, portId: string) => {
   if (!sshClient) throw new Error('SSH not connected');
   const output = await sshClient.execute(`show interfaces ${portId}`);
-  return ProCurveParser.parsePortDetails(output, portId);
+  const details = ProCurveParser.parsePortDetails(output, portId);
+
+  // `show interfaces <port>` has no VLAN data at all; membership only comes
+  // from `show vlan ports <port> detail`.
+  try {
+    const vlanOutput = await sshClient.execute(`show vlan ports ${portId} detail`);
+    details.vlans = ProCurveParser.parsePortVlans(vlanOutput);
+  } catch (e) {
+    // Keep base details usable if the VLAN lookup fails.
+  }
+
+  return details;
 });
 
 ipcMain.handle('switch:getRunningConfig', async () => {
@@ -272,6 +332,25 @@ ipcMain.handle('switch:renameVlan', async (_event, { vlanId, name }: { vlanId: n
   ]);
   if (currentProfile)
     db?.addAuditEntry(currentProfile.id, `Rename VLAN ${vlanId} to "${name}"`, result, true);
+});
+
+ipcMain.handle('switch:setVlanIp', async (_event, cmd: SetVlanIpCommand) => {
+  if (!sshClient) throw new Error('SSH not connected');
+  const cmds: string[] = [`vlan ${cmd.vlanId}`];
+
+  if (cmd.mode === 'manual') {
+    if (!cmd.ipAddress || !cmd.subnetMask) throw new Error('IP address and subnet mask are required');
+    cmds.push(`ip address ${cmd.ipAddress} ${cmd.subnetMask}`);
+  } else if (cmd.mode === 'dhcp') {
+    cmds.push('ip address dhcp-bootp');
+  } else {
+    cmds.push('no ip address');
+  }
+  cmds.push('exit');
+
+  const result = await sshClient.executeInteractive(cmds);
+  if (currentProfile)
+    db?.addAuditEntry(currentProfile.id, `Set IP on VLAN ${cmd.vlanId} (${cmd.mode})`, result, true);
 });
 
 ipcMain.handle('switch:addPortToVlan', async (_event, cmd: AddPortToVlanCommand) => {
@@ -342,6 +421,28 @@ ipcMain.handle('switch:setSystemContact', async (_event, contact: string) => {
   const result = await sshClient.executeInteractive([`snmp-server contact "${contact}"`]);
   if (currentProfile)
     db?.addAuditEntry(currentProfile.id, `Set system contact to "${contact}"`, result, true);
+});
+
+ipcMain.handle('switch:setDefaultGateway', async (_event, gateway: string) => {
+  if (!sshClient) throw new Error('SSH not connected');
+  const result = await sshClient.executeInteractive([`ip default-gateway ${gateway}`]);
+  if (currentProfile)
+    db?.addAuditEntry(currentProfile.id, `Set default gateway to ${gateway}`, result, true);
+});
+
+// vlanId of null disables the restriction (`no management-vlan`), returning
+// management access (Telnet/SSH/web/SNMP) to whichever VLAN has reachable IP.
+ipcMain.handle('switch:setManagementVlan', async (_event, vlanId: number | null) => {
+  if (!sshClient) throw new Error('SSH not connected');
+  const cmd = vlanId === null ? 'no management-vlan' : `management-vlan ${vlanId}`;
+  const result = await sshClient.executeInteractive([cmd]);
+  if (currentProfile)
+    db?.addAuditEntry(
+      currentProfile.id,
+      vlanId === null ? 'Disable management VLAN' : `Set management VLAN to ${vlanId}`,
+      result,
+      true
+    );
 });
 
 ipcMain.handle('switch:saveConfig', async () => {

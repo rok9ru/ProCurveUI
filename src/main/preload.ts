@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('ipc', {
   switchCreateVlan: (data: any) => ipcRenderer.invoke('switch:createVlan', data),
   switchDeleteVlan: (vlanId: number) => ipcRenderer.invoke('switch:deleteVlan', vlanId),
   switchRenameVlan: (data: any) => ipcRenderer.invoke('switch:renameVlan', data),
+  switchSetVlanIp: (cmd: any) => ipcRenderer.invoke('switch:setVlanIp', cmd),
   switchAddPortToVlan: (cmd: any) => ipcRenderer.invoke('switch:addPortToVlan', cmd),
   switchRemovePortFromVlan: (cmd: any) => ipcRenderer.invoke('switch:removePortFromVlan', cmd),
 
@@ -36,6 +37,8 @@ contextBridge.exposeInMainWorld('ipc', {
   // System commands
   switchSetSystemName: (name: string) => ipcRenderer.invoke('switch:setSystemName', name),
   switchSetSystemContact: (contact: string) => ipcRenderer.invoke('switch:setSystemContact', contact),
+  switchSetDefaultGateway: (gateway: string) => ipcRenderer.invoke('switch:setDefaultGateway', gateway),
+  switchSetManagementVlan: (vlanId: number | null) => ipcRenderer.invoke('switch:setManagementVlan', vlanId),
   switchSaveConfig: () => ipcRenderer.invoke('switch:saveConfig'),
 
   // Audit
@@ -49,9 +52,12 @@ contextBridge.exposeInMainWorld('ipc', {
     ipcRenderer.on('ssh:disconnected', () => cb()),
   onSshError: (cb: (err: string) => void) =>
     ipcRenderer.on('ssh:error', (_e, err) => cb(err)),
+  onSshLog: (cb: (line: string) => void) =>
+    ipcRenderer.on('ssh:log', (_e, line) => cb(line)),
   removeSshConnectedListener: () => ipcRenderer.removeAllListeners('ssh:connected'),
   removeSshDisconnectedListener: () => ipcRenderer.removeAllListeners('ssh:disconnected'),
   removeSshErrorListener: () => ipcRenderer.removeAllListeners('ssh:error'),
+  removeSshLogListener: () => ipcRenderer.removeAllListeners('ssh:log'),
 
   // Window controls
   minimize: () => ipcRenderer.invoke('window:minimize'),

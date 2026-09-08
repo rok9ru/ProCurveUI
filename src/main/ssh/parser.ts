@@ -2,7 +2,97 @@ import type { SystemInfo, Vlan, Port } from '../../types/ipc.js';
 
 export class ProCurveParser {
 
-  static parseSystemInfo(output: string): SystemInfo {
+  static parsePortNamesFromRunningConfig(output: string): Map<string, string> {
+    const names = new Map<string, string>();
+    const lines = output.split('\n');
+    let currentPort: string | null = null;
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+
+      const interfaceMatch = line.match(/^interface\s+(\S+)/i);
+      if (interfaceMatch) {
+        currentPort = interfaceMatch[1];
+        continue;
+      }
+
+      // Leave current interface context when another section starts.
+      if (/^(vlan|trunk|router|snmp-server|ip\s+|aaa\s+|spanning-tree|timesync|ntp\s+)/i.test(line)) {
+        currentPort = null;
+        continue;
+      }
+
+      if (!currentPort) continue;
+
+      const nameMatch = line.match(/^name\s+"?(.+?)"?$/i);
+      if (nameMatch) {
+        names.set(currentPort, nameMatch[1].trim());
+      }
+    }
+
+    return names;
+  }
+
+  // Extracts the real hardware model from the login banner, e.g.
+  // "ProCurve J9279A Switch 2510G-24" -> "ProCurve 2510G-24 (J9279A)".
+  // `show system`'s "System Name" is a user-editable hostname, not the model —
+  // it must never be used as a fallback here.
+  static parseModelFromBanner(banner?: string): string | undefined {
+    if (!banner) return undefined;
+    const m = banner.match(/ProCurve\s+(\S+)\s+Switch\s+(\S+)/i);
+    return m ? `ProCurve ${m[2]} (${m[1]})` : undefined;
+  }
+
+  // Parses `show ip` output:
+  //   Internet (IP) Service
+  //   Default Gateway : 192.168.99.1
+  //   VLAN         | IP Config  IP Address      Subnet Mask     Proxy ARP
+  //   ------------ + ---------- --------------- --------------- ---------
+  //   DEFAULT_VLAN | Manual     192.168.99.202  255.255.255.0   No
+  // Note: the VLAN column is the VLAN *name*, not its numeric ID — callers
+  // must cross-reference against a VLAN name->id list (e.g. from parseVlans).
+  static parseIpService(output: string): {
+    defaultGateway?: string;
+    vlans: Array<{ vlanName: string; ipConfig: string; ipAddress?: string; subnetMask?: string }>;
+  } {
+    const result: { defaultGateway?: string; vlans: Array<{ vlanName: string; ipConfig: string; ipAddress?: string; subnetMask?: string }> } = { vlans: [] };
+    const lines = output.split('\n');
+    let inTable = false;
+
+    for (const line of lines) {
+      const gw = line.match(/Default Gateway\s*:\s*(\S+)/i);
+      if (gw) result.defaultGateway = gw[1];
+
+      if (/^[-\s]+\+[-\s]+$/.test(line)) { inTable = true; continue; }
+      if (!inTable) continue;
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      const sides = trimmed.split('|');
+      if (sides.length < 2) continue;
+      const vlanName = sides[0].trim();
+      const cols = sides[1].trim().split(/\s+/);
+      if (!vlanName || !cols[0]) continue;
+
+      result.vlans.push({
+        vlanName,
+        ipConfig: cols[0],
+        ipAddress: cols[1],
+        subnetMask: cols[2],
+      });
+    }
+
+    return result;
+  }
+
+  // Parses a `management-vlan <VID>` line out of `show running-config`.
+  // Absent entirely when management access isn't restricted to one VLAN.
+  static parseManagementVlan(runningConfig: string): number | undefined {
+    const m = runningConfig.match(/^management-vlan\s+(\d+)/m);
+    return m ? parseInt(m[1], 10) : undefined;
+  }
+
+  static parseSystemInfo(output: string, banner?: string): SystemInfo {
     const lines = output.split('\n');
     const info: Partial<SystemInfo> = {
       ports: { total: 48, active: 0, inactive: 0 },
@@ -45,7 +135,7 @@ export class ProCurveParser {
     }
 
     return {
-      model: 'ProCurve 2510G-48',
+      model: this.parseModelFromBanner(banner) || 'Unknown',
       firmwareVersion: info.firmwareVersion || 'Unknown',
       romVersion: info.romVersion,
       serialNumber: info.serialNumber || 'Unknown',
@@ -108,21 +198,25 @@ export class ProCurveParser {
       }
     }
 
-    // Parse port membership section
-    // ProCurve shows something like:
-    //  Tagged   : 1-4,10
-    //  Untagged : 5-9
-    // OR column format with Tagged/Untagged columns
-    const taggedLine = lines.find(l => /Tagged\s*:/i.test(l) && !/Untagged/i.test(l));
-    const untaggedLine = lines.find(l => /Untagged\s*:/i.test(l));
+    // Port membership is a per-port table, not a "Tagged: 1-4,10" summary line:
+    //   Port Information Mode     Unknown VLAN Status
+    //   ---------------- -------- ------------ ----------
+    //   1                Untagged Learn        Up
+    //   2                Tagged   Learn        Up
+    //   3                No       Learn        Down
+    let inTable = false;
+    for (const line of lines) {
+      if (/^[-\s]+$/.test(line) && line.includes('-')) { inTable = true; continue; }
+      if (!inTable) continue;
+      const trimmed = line.trim();
+      if (!trimmed) continue;
 
-    if (taggedLine) {
-      const m = taggedLine.match(/Tagged\s*:\s*(.+)$/i);
-      if (m && !/none/i.test(m[1])) vlan.ports.tagged = this.expandPortRange(m[1]);
-    }
-    if (untaggedLine) {
-      const m = untaggedLine.match(/Untagged\s*:\s*(.+)$/i);
-      if (m && !/none/i.test(m[1])) vlan.ports.untagged = this.expandPortRange(m[1]);
+      const [portId, mode] = trimmed.split(/\s+/);
+      if (!portId || !mode) continue;
+
+      if (/^untagged$/i.test(mode)) vlan.ports.untagged.push(portId);
+      else if (/^tagged$/i.test(mode)) vlan.ports.tagged.push(portId);
+      // "No" means the port isn't a member of this VLAN at all.
     }
 
     return vlan;
@@ -218,18 +312,32 @@ export class ProCurveParser {
     return details;
   }
 
-  private static expandPortRange(rangeStr: string): string[] {
-    const ports: string[] = [];
-    const parts = rangeStr.replace(/\s/g, '').split(',');
-    for (const part of parts) {
-      if (part.includes('-')) {
-        const [s, e] = part.split('-').map(Number);
-        for (let i = s; i <= e; i++) ports.push(String(i));
-      } else if (part) {
-        ports.push(part);
-      }
+  // `show interfaces <port>` (no "brief") is traffic counters only — no VLAN data.
+  // The actual per-port VLAN membership comes from `show vlan ports <port> detail`:
+  //   VLAN ID Name                 Status       Voice Jumbo Mode
+  //   ------- -------------------- ------------ ----- ----- --------
+  //   1       DEFAULT_VLAN         Port-based   No    No    Untagged
+  static parsePortVlans(output: string): { tagged: number[]; untagged?: number } {
+    const result: { tagged: number[]; untagged?: number } = { tagged: [] };
+    const lines = output.split('\n');
+    let inTable = false;
+
+    for (const line of lines) {
+      if (/^[-\s]+$/.test(line) && line.includes('-')) { inTable = true; continue; }
+      if (!inTable) continue;
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      const parts = trimmed.split(/\s+/);
+      const vlanId = parseInt(parts[0], 10);
+      const mode = parts[parts.length - 1];
+      if (!Number.isFinite(vlanId) || !mode) continue;
+
+      if (/^untagged$/i.test(mode)) result.untagged = vlanId;
+      else if (/^tagged$/i.test(mode)) result.tagged.push(vlanId);
     }
-    return ports;
+
+    return result;
   }
 
   static hasError(output: string): boolean {

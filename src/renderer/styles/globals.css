@@ -13,6 +13,11 @@ html, body, #root {
 }
 
 body {
+  /* Without this, Chromium renders native widgets (the <select> dropdown
+     popup, scrollbars, etc.) with the OS's light theme regardless of our own
+     dark styling — since we also force white text on <select>, that text
+     inherits into the popup and lands on a light background: unreadable. */
+  color-scheme: dark;
   background-color: #1f2228;
   color: #ffffff;
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
@@ -20,6 +25,13 @@ body {
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* Belt-and-suspenders: explicit colors for the <option> popup, since
+   color-scheme support/behavior for select popups still varies. */
+select option {
+  background-color: #1f2228;
+  color: #ffffff;
 }
 
 /* Scrollbar styling */

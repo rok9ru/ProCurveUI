@@ -65,6 +65,12 @@ export default function VlansTab({ vlans, onRefresh }: Props) {
   const [portTagged, setPortTagged] = useState(false);
   const [removePortInput, setRemovePortInput] = useState('');
 
+  // IP config form
+  const [editingIp, setEditingIp] = useState(false);
+  const [ipMode, setIpMode] = useState<'manual' | 'dhcp' | 'disabled'>('manual');
+  const [ipAddress, setIpAddress] = useState('');
+  const [subnetMask, setSubnetMask] = useState('');
+
   // Detail view
   const [detailVlan, setDetailVlan] = useState<Vlan | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -138,6 +144,27 @@ export default function VlansTab({ vlans, onRefresh }: Props) {
       await window.ipc.switchAddPortToVlan({ vlanId: selectedVlan.id, ports, tagged: portTagged });
       setPortInput('');
       flash(`Port(s) added to VLAN ${selectedVlan.id}`);
+      loadDetail(selectedVlan);
+    } catch (e: any) {
+      flash(String(e), true);
+    } finally { setLoading(false); }
+  };
+
+  const handleSetIp = async () => {
+    if (!selectedVlan) return;
+    if (ipMode === 'manual' && (!ipAddress.trim() || !subnetMask.trim())) {
+      return flash('IP address and subnet mask required', true);
+    }
+    setLoading(true);
+    try {
+      await window.ipc.switchSetVlanIp({
+        vlanId: selectedVlan.id,
+        mode: ipMode,
+        ipAddress: ipMode === 'manual' ? ipAddress.trim() : undefined,
+        subnetMask: ipMode === 'manual' ? subnetMask.trim() : undefined,
+      });
+      setEditingIp(false);
+      flash(`VLAN ${selectedVlan.id} IP configuration updated`);
       loadDetail(selectedVlan);
     } catch (e: any) {
       flash(String(e), true);
@@ -261,6 +288,63 @@ export default function VlansTab({ vlans, onRefresh }: Props) {
               <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: '13px' }}>Loading port details…</div>
             ) : detailVlan && (
               <>
+                {/* IP configuration */}
+                <div style={{ padding: '16px', border: '1px solid rgba(255,255,255,0.1)', marginBottom: 24 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: editingIp ? 12 : 0 }}>
+                    <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: '11px', fontFamily: 'Geist Mono, monospace', textTransform: 'uppercase', letterSpacing: '0.8px' }}>
+                      IP Configuration
+                    </div>
+                    {!editingIp && (
+                      <button
+                        style={{ ...S.btn(), fontSize: '10px', padding: '3px 8px' }}
+                        onClick={() => {
+                          const mode = detailVlan.ipConfig === 'DHCP/Bootp' ? 'dhcp' : detailVlan.ipConfig === 'Manual' ? 'manual' : 'disabled';
+                          setIpMode(mode);
+                          setIpAddress(detailVlan.ipAddress || '');
+                          setSubnetMask(detailVlan.subnetMask || '');
+                          setEditingIp(true);
+                        }}
+                      >
+                        Edit
+                      </button>
+                    )}
+                  </div>
+
+                  {!editingIp ? (
+                    <div style={{ fontSize: '13px', color: '#ffffff', marginTop: 8 }}>
+                      {detailVlan.ipConfig === 'Manual'
+                        ? `${detailVlan.ipAddress} / ${detailVlan.subnetMask}`
+                        : detailVlan.ipConfig || '—'}
+                    </div>
+                  ) : (
+                    <div>
+                      <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                        {(['manual', 'dhcp', 'disabled'] as const).map(m => (
+                          <button key={m} style={{ ...S.btn(ipMode === m ? 'primary' : 'ghost'), fontSize: '11px' }} onClick={() => setIpMode(m)}>
+                            {m === 'manual' ? 'Manual' : m === 'dhcp' ? 'DHCP/Bootp' : 'Disabled'}
+                          </button>
+                        ))}
+                      </div>
+                      {ipMode === 'manual' && (
+                        <div style={{ display: 'flex', gap: 10, marginBottom: 10 }}>
+                          <div style={{ flex: 1 }}>
+                            <label style={S.label()}>IP Address</label>
+                            <input value={ipAddress} onChange={e => setIpAddress(e.target.value)} style={S.input()} placeholder="192.168.1.10" />
+                          </div>
+                          <div style={{ flex: 1 }}>
+                            <label style={S.label()}>Subnet Mask</label>
+                            <input value={subnetMask} onChange={e => setSubnetMask(e.target.value)} style={S.input()} placeholder="255.255.255.0" />
+                          </div>
+                        </div>
+                      )}
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button style={S.btn('primary', loading)} onClick={handleSetIp} disabled={loading}>Save</button>
+                        <button style={S.btn()} onClick={() => setEditingIp(false)}>Cancel</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 {/* Port membership */}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 24 }}>
                   <div style={{ padding: '16px', border: '1px solid rgba(255,255,255,0.1)', backgroundColor: 'rgba(255,255,255,0.02)' }}>

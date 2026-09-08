@@ -3,6 +3,8 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 
 export default defineConfig({
+  // Electron production loads index.html via file://, so assets must be relative.
+  base: './',
   plugins: [react()],
   resolve: {
     alias: {

@@ -255,7 +255,7 @@ export default function Dashboard({ profile }: Props) {
         )}
 
         {tab === 'system' && (
-          <SystemTab systemInfo={systemInfo} onRefresh={loadSystemInfo} />
+          <SystemTab systemInfo={systemInfo} vlans={vlans} onRefresh={loadSystemInfo} />
         )}
 
         {tab === 'terminal' && <TerminalTab />}

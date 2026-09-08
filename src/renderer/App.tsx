@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import ConnectionManager from './components/ConnectionManager';
 import Dashboard from './pages/Dashboard';
 import type {
   SSHProfile, SystemInfo, Vlan, Port, AuditLogEntry,
   CreateVlanCommand, AddPortToVlanCommand, RemovePortFromVlanCommand, ConfigurePortCommand,
+  SetVlanIpCommand,
 } from '@types/ipc';
 
 declare global {
@@ -32,6 +33,7 @@ declare global {
       switchCreateVlan: (data: CreateVlanCommand) => Promise<void>;
       switchDeleteVlan: (vlanId: number) => Promise<void>;
       switchRenameVlan: (data: { vlanId: number; name: string }) => Promise<void>;
+      switchSetVlanIp: (cmd: SetVlanIpCommand) => Promise<void>;
       switchAddPortToVlan: (cmd: AddPortToVlanCommand) => Promise<void>;
       switchRemovePortFromVlan: (cmd: RemovePortFromVlanCommand) => Promise<void>;
       // Port commands
@@ -39,6 +41,8 @@ declare global {
       // System
       switchSetSystemName: (name: string) => Promise<void>;
       switchSetSystemContact: (contact: string) => Promise<void>;
+      switchSetDefaultGateway: (gateway: string) => Promise<void>;
+      switchSetManagementVlan: (vlanId: number | null) => Promise<void>;
       switchSaveConfig: () => Promise<string>;
       // Audit
       auditList: (profileId?: string) => Promise<AuditLogEntry[]>;
@@ -47,9 +51,11 @@ declare global {
       onSshConnected: (cb: (data: any) => void) => void;
       onSshDisconnected: (cb: () => void) => void;
       onSshError: (cb: (err: string) => void) => void;
+      onSshLog: (cb: (line: string) => void) => void;
       removeSshConnectedListener: () => void;
       removeSshDisconnectedListener: () => void;
       removeSshErrorListener: () => void;
+      removeSshLogListener: () => void;
       // Window controls
       minimize: () => Promise<void>;
       maximize: () => Promise<void>;
@@ -70,12 +76,20 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [isMaximized, setIsMaximized] = useState(false);
 
+  const [logLines, setLogLines] = useState<string[]>([]);
+  const [logWidth, setLogWidth] = useState(280);
+  const logResizing = useRef(false);
+  const logBodyRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     window.ipc?.sshIsConnected().then(setIsConnected).catch(() => {});
 
     window.ipc?.onSshConnected(() => { setIsConnected(true); setError(null); });
     window.ipc?.onSshDisconnected(() => { setIsConnected(false); setCurrentProfile(null); });
     window.ipc?.onSshError(setError);
+    window.ipc?.onSshLog((line: string) => {
+      setLogLines(prev => (prev.length >= 1000 ? [...prev.slice(-999), line] : [...prev, line]));
+    });
 
     // Window events
     if (typeof window.ipc?.isWindowMaximized === 'function') {
@@ -90,9 +104,33 @@ export default function App() {
       window.ipc?.removeSshConnectedListener();
       window.ipc?.removeSshDisconnectedListener();
       window.ipc?.removeSshErrorListener();
+      window.ipc?.removeSshLogListener();
       // No remove listeners for window events (rarely needed) - fine for now
     };
   }, []);
+
+  // Auto-scroll the SSH log to the newest line as it grows.
+  useEffect(() => {
+    const el = logBodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [logLines]);
+
+  const startLogResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    logResizing.current = true;
+    const onMove = (ev: MouseEvent) => {
+      if (!logResizing.current) return;
+      const newWidth = window.innerWidth - ev.clientX;
+      setLogWidth(Math.min(Math.max(newWidth, 160), Math.round(window.innerWidth * 0.6)));
+    };
+    const onUp = () => {
+      logResizing.current = false;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
 
   const handleDisconnect = async () => {
     await window.ipc?.sshDisconnect();
@@ -175,11 +213,44 @@ export default function App() {
 
       {/* Main */}
       <div style={{ flex: 1, overflow: 'hidden', display: 'flex' }}>
-        {!isConnected ? (
-          <ConnectionManager onConnected={p => { setCurrentProfile(p); setIsConnected(true); }} />
-        ) : (
-          <Dashboard profile={currentProfile} />
-        )}
+        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', minWidth: 0 }}>
+          {!isConnected ? (
+            <ConnectionManager onConnected={p => { setCurrentProfile(p); setIsConnected(true); }} />
+          ) : (
+            <Dashboard profile={currentProfile} />
+          )}
+        </div>
+
+        {/* SSH log resizer */}
+        <div
+          onMouseDown={startLogResize}
+          title="Drag to resize"
+          style={{ width: 4, flexShrink: 0, cursor: 'col-resize', backgroundColor: 'rgba(255,255,255,0.08)' }}
+        />
+
+        {/* SSH log panel */}
+        <div style={{ width: logWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', backgroundColor: '#16181b', borderLeft: '1px solid rgba(255,255,255,0.1)' }}>
+          <div style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.1)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
+            <span style={{ fontFamily: 'Geist Mono, monospace', fontSize: '11px', color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: '1px' }}>
+              SSH Log
+            </span>
+            <button
+              onClick={() => setLogLines([])}
+              style={{ background: 'none', border: '1px solid rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.5)', fontFamily: 'Geist Mono, monospace', fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.6px', padding: '2px 8px', cursor: 'pointer' }}
+            >
+              Clear
+            </button>
+          </div>
+          <div ref={logBodyRef} style={{ flex: 1, overflow: 'auto', padding: '8px 10px' }}>
+            {logLines.length === 0 ? (
+              <div style={{ color: 'rgba(255,255,255,0.25)', fontSize: '11px', fontFamily: 'Geist Mono, monospace' }}>No SSH activity yet.</div>
+            ) : logLines.map((line, i) => (
+              <div key={i} style={{ fontFamily: 'Geist Mono, monospace', fontSize: '10px', color: 'rgba(255,255,255,0.55)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', marginBottom: 2 }}>
+                {line}
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
     </div>
   );
