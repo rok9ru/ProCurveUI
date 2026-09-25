@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import type { SSHProfile } from '@types/ipc';
 
 const S = {
@@ -47,6 +47,34 @@ interface Props {
 
 type View = 'connect' | 'new' | 'manage' | 'edit';
 
+// Defined at module scope (not inside ConnectionManager) so their component
+// identity stays stable across renders — nesting these inside the component
+// function recreated them on every render, which made React remount their
+// whole subtree (including every <input>) on each keystroke and drop focus.
+const Card = ({ children }: { children: React.ReactNode }) => (
+  <div style={{
+    width: '100%',
+    maxWidth: 440,
+    padding: '40px',
+    border: '1px solid rgba(255,255,255,0.1)',
+    backgroundColor: 'rgba(255,255,255,0.02)',
+  }}>
+    {children}
+  </div>
+);
+
+const Title = ({ children }: { children: React.ReactNode }) => (
+  <h2 style={{ fontFamily: 'Geist Mono, monospace', fontSize: '22px', fontWeight: 300, color: '#ffffff', textTransform: 'uppercase', letterSpacing: '1.4px', marginTop: 0, marginBottom: 32 }}>
+    {children}
+  </h2>
+);
+
+const ErrorBox = ({ error }: { error: string | null }) => error ? (
+  <div style={{ marginBottom: 20, padding: '10px 14px', backgroundColor: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.2)', color: '#fca5a5', fontSize: '12px', borderRadius: 0 }}>
+    {error}
+  </div>
+) : null;
+
 export default function ConnectionManager({ onConnected }: Props) {
   const [view, setView] = useState<View>('connect');
   const [profiles, setProfiles] = useState<SSHProfile[]>([]);
@@ -62,14 +90,6 @@ export default function ConnectionManager({ onConnected }: Props) {
   const [newUser, setNewUser] = useState('');
   const [newPass, setNewPass] = useState('');
   const [newSavePass, setNewSavePass] = useState(false);
-  // refs for inputs to preserve focus and caret
-  const nameRef = useRef<HTMLInputElement | null>(null);
-  const hostRef = useRef<HTMLInputElement | null>(null);
-  const portRef = useRef<HTMLInputElement | null>(null);
-  const userRef = useRef<HTMLInputElement | null>(null);
-  const passRef = useRef<HTMLInputElement | null>(null);
-  const focusedFieldRef = useRef<string | null>(null);
-  const caretRef = useRef<number | null>(null);
 
   // Edit profile state
   const [editId, setEditId] = useState('');
@@ -78,33 +98,8 @@ export default function ConnectionManager({ onConnected }: Props) {
   const [editUser, setEditUser] = useState('');
   const [editPass, setEditPass] = useState('');
   const [editSavePass, setEditSavePass] = useState(false);
-  const editHostRef = useRef<HTMLInputElement | null>(null);
-  const editPortRef = useRef<HTMLInputElement | null>(null);
-  const editUserRef = useRef<HTMLInputElement | null>(null);
-  const editPassRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => { loadProfiles(); }, []);
-
-  // Restore focus and caret position when controlled inputs re-render
-  useEffect(() => {
-    const name = focusedFieldRef.current;
-    if (!name) return;
-    let el: HTMLInputElement | null = null;
-    if (name === 'newName') el = nameRef.current;
-    else if (name === 'newHost') el = hostRef.current;
-    else if (name === 'newPort') el = portRef.current;
-    else if (name === 'newUser') el = userRef.current;
-    else if (name === 'newPass') el = passRef.current;
-    else if (name === 'editHost') el = editHostRef.current;
-    else if (name === 'editPort') el = editPortRef.current;
-    else if (name === 'editUser') el = editUserRef.current;
-    else if (name === 'editPass') el = editPassRef.current;
-    if (el && document.activeElement !== el) {
-      el.focus();
-      const pos = caretRef.current ?? el.value.length;
-      try { el.setSelectionRange(pos, pos); } catch (e) {}
-    }
-  });
 
   const loadProfiles = async () => {
     try {
@@ -213,36 +208,12 @@ export default function ConnectionManager({ onConnected }: Props) {
 
   const currentProfile = profiles.find(p => p.id === selectedId);
 
-  const Card = ({ children }: { children: React.ReactNode }) => (
-    <div style={{
-      width: '100%',
-      maxWidth: 440,
-      padding: '40px',
-      border: '1px solid rgba(255,255,255,0.1)',
-      backgroundColor: 'rgba(255,255,255,0.02)',
-    }}>
-      {children}
-    </div>
-  );
-
-  const Title = ({ children }: { children: React.ReactNode }) => (
-    <h2 style={{ fontFamily: 'Geist Mono, monospace', fontSize: '22px', fontWeight: 300, color: '#ffffff', textTransform: 'uppercase', letterSpacing: '1.4px', marginTop: 0, marginBottom: 32 }}>
-      {children}
-    </h2>
-  );
-
-  const ErrorBox = () => error ? (
-    <div style={{ marginBottom: 20, padding: '10px 14px', backgroundColor: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.2)', color: '#fca5a5', fontSize: '12px', borderRadius: 0 }}>
-      {error}
-    </div>
-  ) : null;
-
   return (
     <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '48px', backgroundColor: '#1f2228' }}>
       {view === 'connect' && (
         <Card>
           <Title>Connect</Title>
-          <ErrorBox />
+          <ErrorBox error={error} />
 
           {profiles.length === 0 ? (
             <div style={{ marginBottom: 24, padding: '16px', border: '1px solid rgba(255,255,255,0.1)', color: 'rgba(255,255,255,0.4)', fontSize: '13px', textAlign: 'center' }}>
@@ -309,17 +280,13 @@ export default function ConnectionManager({ onConnected }: Props) {
       {view === 'new' && (
         <Card>
           <Title>New Profile</Title>
-          <ErrorBox />
+          <ErrorBox error={error} />
 
           <div style={S.formGroup()}>
             <label style={S.label()}>Profile Name</label>
             <input
-              ref={nameRef}
               value={newName}
               onChange={e => setNewName(e.target.value)}
-              onFocus={() => { focusedFieldRef.current = 'newName'; }}
-              onKeyUp={e => { caretRef.current = (e.target as HTMLInputElement).selectionStart; }}
-              onSelect={e => { caretRef.current = (e.target as HTMLInputElement).selectionStart; }}
               style={S.input()}
               placeholder="Core Switch"
             />
@@ -328,12 +295,8 @@ export default function ConnectionManager({ onConnected }: Props) {
             <div>
               <label style={S.label()}>Host / IP</label>
               <input
-                ref={hostRef}
                 value={newHost}
                 onChange={e => setNewHost(e.target.value)}
-                onFocus={() => { focusedFieldRef.current = 'newHost'; }}
-                onKeyUp={e => { caretRef.current = (e.target as HTMLInputElement).selectionStart; }}
-                onSelect={e => { caretRef.current = (e.target as HTMLInputElement).selectionStart; }}
                 style={S.input()}
                 placeholder="Switch IP"
               />
@@ -341,12 +304,8 @@ export default function ConnectionManager({ onConnected }: Props) {
             <div>
               <label style={S.label()}>Port</label>
               <input
-                ref={portRef}
                 value={newPort}
                 onChange={e => setNewPort(e.target.value)}
-                onFocus={() => { focusedFieldRef.current = 'newPort'; }}
-                onKeyUp={e => { caretRef.current = (e.target as HTMLInputElement).selectionStart; }}
-                onSelect={e => { caretRef.current = (e.target as HTMLInputElement).selectionStart; }}
                 style={S.input()}
                 placeholder="22"
               />
@@ -355,12 +314,8 @@ export default function ConnectionManager({ onConnected }: Props) {
           <div style={S.formGroup()}>
             <label style={S.label()}>Username</label>
             <input
-              ref={userRef}
               value={newUser}
               onChange={e => setNewUser(e.target.value)}
-              onFocus={() => { focusedFieldRef.current = 'newUser'; }}
-              onKeyUp={e => { caretRef.current = (e.target as HTMLInputElement).selectionStart; }}
-              onSelect={e => { caretRef.current = (e.target as HTMLInputElement).selectionStart; }}
               style={S.input()}
               placeholder="SSH User"
             />
@@ -368,13 +323,9 @@ export default function ConnectionManager({ onConnected }: Props) {
           <div style={S.formGroup()}>
             <label style={S.label()}>Password</label>
             <input
-              ref={passRef}
               type="password"
               value={newPass}
               onChange={e => setNewPass(e.target.value)}
-              onFocus={() => { focusedFieldRef.current = 'newPass'; }}
-              onKeyUp={e => { caretRef.current = (e.target as HTMLInputElement).selectionStart; }}
-              onSelect={e => { caretRef.current = (e.target as HTMLInputElement).selectionStart; }}
               style={S.input()}
               placeholder="SSH password"
             />
@@ -398,7 +349,7 @@ export default function ConnectionManager({ onConnected }: Props) {
       {view === 'manage' && (
         <Card>
           <Title>Profiles</Title>
-          <ErrorBox />
+          <ErrorBox error={error} />
 
           <div style={{ marginBottom: 20 }}>
             {profiles.map(p => (
@@ -437,7 +388,7 @@ export default function ConnectionManager({ onConnected }: Props) {
       {view === 'edit' && (
         <Card>
           <Title>Edit Profile</Title>
-          <ErrorBox />
+          <ErrorBox error={error} />
 
           {profiles.find(p => p.id === editId) && (
             <>
@@ -451,12 +402,8 @@ export default function ConnectionManager({ onConnected }: Props) {
                 <div>
                   <label style={S.label()}>Host / IP</label>
                   <input
-                    ref={editHostRef}
                     value={editHost}
                     onChange={e => setEditHost(e.target.value)}
-                    onFocus={() => { focusedFieldRef.current = 'editHost'; }}
-                    onKeyUp={e => { caretRef.current = (e.target as HTMLInputElement).selectionStart; }}
-                    onSelect={e => { caretRef.current = (e.target as HTMLInputElement).selectionStart; }}
                     style={S.input()}
                     placeholder="Switch IP"
                   />
@@ -464,12 +411,8 @@ export default function ConnectionManager({ onConnected }: Props) {
                 <div>
                   <label style={S.label()}>Port</label>
                   <input
-                    ref={editPortRef}
                     value={editPort}
                     onChange={e => setEditPort(e.target.value)}
-                    onFocus={() => { focusedFieldRef.current = 'editPort'; }}
-                    onKeyUp={e => { caretRef.current = (e.target as HTMLInputElement).selectionStart; }}
-                    onSelect={e => { caretRef.current = (e.target as HTMLInputElement).selectionStart; }}
                     style={S.input()}
                     placeholder="22"
                   />
@@ -478,12 +421,8 @@ export default function ConnectionManager({ onConnected }: Props) {
               <div style={S.formGroup()}>
                 <label style={S.label()}>Username</label>
                 <input
-                  ref={editUserRef}
                   value={editUser}
                   onChange={e => setEditUser(e.target.value)}
-                  onFocus={() => { focusedFieldRef.current = 'editUser'; }}
-                  onKeyUp={e => { caretRef.current = (e.target as HTMLInputElement).selectionStart; }}
-                  onSelect={e => { caretRef.current = (e.target as HTMLInputElement).selectionStart; }}
                   style={S.input()}
                   placeholder="SSH User"
                 />
@@ -491,13 +430,9 @@ export default function ConnectionManager({ onConnected }: Props) {
               <div style={S.formGroup()}>
                 <label style={S.label()}>Password</label>
                 <input
-                  ref={editPassRef}
                   type="password"
                   value={editPass}
                   onChange={e => setEditPass(e.target.value)}
-                  onFocus={() => { focusedFieldRef.current = 'editPass'; }}
-                  onKeyUp={e => { caretRef.current = (e.target as HTMLInputElement).selectionStart; }}
-                  onSelect={e => { caretRef.current = (e.target as HTMLInputElement).selectionStart; }}
                   style={S.input()}
                   placeholder="SSH password"
                 />

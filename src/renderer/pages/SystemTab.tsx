@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import type { SystemInfo, Vlan } from '@types/ipc';
+import type { SystemInfo, Vlan, FirmwareFileInfo, FirmwareProgress } from '@types/ipc';
+import SwitchCatalogBadge from '../components/SwitchCatalogBadge';
 
 const S = {
   btn: (variant: 'primary' | 'ghost' | 'danger' = 'ghost', disabled = false): React.CSSProperties => ({
@@ -96,6 +97,18 @@ export default function SystemTab({ systemInfo, vlans, onRefresh }: Props) {
   const [runningConfig, setRunningConfig] = useState<string | null>(null);
   const [configLoading, setConfigLoading] = useState(false);
 
+  // Firmware update — always targets the secondary flash bank; activating it
+  // (the reboot) is a deliberately separate step from uploading.
+  const [fwFile, setFwFile] = useState<FirmwareFileInfo | null>(null);
+  const [fwUploading, setFwUploading] = useState(false);
+  const [fwProgress, setFwProgress] = useState<FirmwareProgress | null>(null);
+  const [fwActivating, setFwActivating] = useState(false);
+
+  useEffect(() => {
+    window.ipc.onFirmwareProgress((p) => setFwProgress(p));
+    return () => { window.ipc.removeFirmwareProgressListener(); };
+  }, []);
+
   const flash = (msg: string, isError = false) => {
     if (isError) { setError(msg); setTimeout(() => setError(null), 4000); }
     else { setSuccess(msg); setTimeout(() => setSuccess(null), 3000); }
@@ -108,6 +121,44 @@ export default function SystemTab({ systemInfo, vlans, onRefresh }: Props) {
       flash('Configuration saved to startup (write memory)');
     } catch (e: any) { flash(String(e), true); }
     finally { setLoading(false); }
+  };
+
+  const pickFirmwareFile = async () => {
+    try {
+      const file = await window.ipc.switchSelectFirmwareFile();
+      if (file) setFwFile(file);
+    } catch (e: any) { flash(String(e), true); }
+  };
+
+  const uploadFirmware = async () => {
+    if (!fwFile) return;
+    if (!confirm(`Upload "${fwFile.name}" to the SECONDARY flash bank? This overwrites whatever is currently in secondary. Primary is left untouched.`)) return;
+    setFwUploading(true);
+    setFwProgress(null);
+    try {
+      const result = await window.ipc.switchUploadFirmware(fwFile.path);
+      flash(`Uploaded to secondary${result.flash?.secondary.version ? `: ${result.flash.secondary.version}` : ''}`);
+      setFwFile(null);
+      onRefresh();
+    } catch (e: any) {
+      flash(String(e), true);
+    } finally {
+      setFwUploading(false);
+      setFwProgress(null);
+    }
+  };
+
+  const activateSecondary = async () => {
+    if (!confirm('Reboot the switch from the SECONDARY flash bank now? The switch will be unreachable for about a minute while it reboots.')) return;
+    setFwActivating(true);
+    try {
+      await window.ipc.switchActivateFirmwareBank();
+      flash('Switch is rebooting into secondary — reconnect once it comes back up.');
+    } catch (e: any) {
+      flash(String(e), true);
+    } finally {
+      setFwActivating(false);
+    }
   };
 
   const setSystemName = async () => {
@@ -223,12 +274,72 @@ export default function SystemTab({ systemInfo, vlans, onRefresh }: Props) {
                 ['Firmware', systemInfo.firmwareVersion],
                 ['ROM Version', systemInfo.romVersion || '—'],
                 ['Uptime', systemInfo.systemUptime],
+                ...(systemInfo.flash ? [
+                  ['Active Image', systemInfo.flash.currentBoot],
+                  ['Primary Image', `${systemInfo.flash.primary.version}${systemInfo.flash.primary.date ? ` (${systemInfo.flash.primary.date})` : ''}`],
+                  ['Secondary Image', `${systemInfo.flash.secondary.version}${systemInfo.flash.secondary.date ? ` (${systemInfo.flash.secondary.date})` : ''}`],
+                ] as [string, string][] : []),
               ].map(([k, v]) => (
                 <div key={k} style={S.row()}>
                   <span style={S.key()}>{k}</span>
                   <span style={S.val()}>{v}</span>
                 </div>
               ))}
+            </div>
+          </div>
+
+          {systemInfo.catalog && <SwitchCatalogBadge catalog={systemInfo.catalog} />}
+
+          {/* Firmware update */}
+          <div style={{ marginBottom: 32 }}>
+            <h3 style={{ fontFamily: 'Geist Mono, monospace', fontSize: '13px', fontWeight: 400, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '1.2px', marginBottom: 16, marginTop: 0 }}>Firmware Update</h3>
+            <div style={{ border: '1px solid rgba(255,255,255,0.1)', padding: '16px' }}>
+              <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: '11px', marginBottom: 14, lineHeight: 1.5 }}>
+                Uploads always go to the <strong style={{ color: 'rgba(255,255,255,0.7)' }}>secondary</strong> flash bank over TFTP — primary is never touched. Activating (rebooting into secondary) is a separate step below.
+              </div>
+
+              {!fwFile ? (
+                <button style={S.btn('ghost', fwUploading)} onClick={pickFirmwareFile} disabled={fwUploading}>
+                  Choose Firmware File (.swi)
+                </button>
+              ) : (
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: '13px', color: '#ffffff', marginBottom: 4 }}>{fwFile.name}</div>
+                  <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.4)' }}>{(fwFile.size / 1024).toFixed(0)} KB</div>
+                </div>
+              )}
+
+              {fwFile && (
+                <div style={{ display: 'flex', gap: 10, marginBottom: fwUploading ? 14 : 0 }}>
+                  <button style={S.btn('primary', fwUploading)} onClick={uploadFirmware} disabled={fwUploading}>
+                    {fwUploading ? 'Uploading…' : 'Upload to Secondary'}
+                  </button>
+                  <button style={S.btn('ghost', fwUploading)} onClick={() => setFwFile(null)} disabled={fwUploading}>Cancel</button>
+                </div>
+              )}
+
+              {fwUploading && fwProgress && (
+                <div>
+                  <div style={{ height: 4, backgroundColor: 'rgba(255,255,255,0.1)', marginBottom: 6 }}>
+                    <div style={{ height: '100%', width: `${Math.round((fwProgress.bytesSent / fwProgress.totalBytes) * 100)}%`, backgroundColor: '#10b981', transition: 'width 0.2s' }} />
+                  </div>
+                  <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.4)', fontFamily: 'Geist Mono, monospace' }}>
+                    {(fwProgress.bytesSent / 1024).toFixed(0)} / {(fwProgress.totalBytes / 1024).toFixed(0)} KB
+                  </div>
+                </div>
+              )}
+
+              <div style={{ marginTop: 18, paddingTop: 18, borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+                <button style={S.btn('danger', fwActivating)} onClick={activateSecondary} disabled={fwActivating}>
+                  {fwActivating ? 'Rebooting…' : 'Activate Secondary (Reboot)'}
+                </button>
+                {systemInfo.flash && (
+                  <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.3)', marginTop: 8 }}>
+                    Secondary currently holds {systemInfo.flash.secondary.version}
+                    {systemInfo.flash.secondary.date ? ` (${systemInfo.flash.secondary.date})` : ''}.
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 

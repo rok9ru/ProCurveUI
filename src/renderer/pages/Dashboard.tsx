@@ -5,6 +5,7 @@ import PortsTab from './PortsTab';
 import SystemTab from './SystemTab';
 import TerminalTab from './TerminalTab';
 import AuditTab from './AuditTab';
+import SwitchCatalogBadge from '../components/SwitchCatalogBadge';
 
 type Tab = 'overview' | 'ports' | 'vlans' | 'system' | 'terminal' | 'audit';
 
@@ -169,6 +170,8 @@ export default function Dashboard({ profile }: Props) {
                   </div>
                 </div>
 
+                {systemInfo.catalog && <SwitchCatalogBadge catalog={systemInfo.catalog} />}
+
                 {/* System details */}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 32 }}>
                   <div style={{ padding: '20px', border: '1px solid rgba(255,255,255,0.1)', backgroundColor: 'rgba(255,255,255,0.02)' }}>
@@ -190,7 +193,7 @@ export default function Dashboard({ profile }: Props) {
                   <div style={{ padding: '20px', border: '1px solid rgba(255,255,255,0.1)', backgroundColor: 'rgba(255,255,255,0.02)' }}>
                     <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: '11px', fontFamily: 'Geist Mono, monospace', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 12 }}>Port Map</div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, 1fr)', gap: 4 }}>
-                      {ports.slice(0, 48).map(p => (
+                      {ports.map(p => (
                         <div
                           key={p.id}
                           title={`Port ${p.id}: ${!p.enabled ? 'Disabled' : p.status === 'up' ? `Up ${p.speed}` : 'Down'}`}
@@ -198,9 +201,9 @@ export default function Dashboard({ profile }: Props) {
                             aspectRatio: '1',
                             backgroundColor: !p.enabled ? 'rgba(255,255,255,0.05)' : p.status === 'up' ? 'rgba(16,185,129,0.25)' : 'rgba(239,68,68,0.2)',
                             border: `1px solid ${!p.enabled ? 'rgba(255,255,255,0.05)' : p.status === 'up' ? '#10b981' : '#ef4444'}`,
+                            cursor: 'pointer',
                           }}
                           onClick={() => setTab('ports')}
-                          style2={{ cursor: 'pointer' }}
                         />
                       ))}
                     </div>

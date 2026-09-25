@@ -4,7 +4,7 @@ import Dashboard from './pages/Dashboard';
 import type {
   SSHProfile, SystemInfo, Vlan, Port, AuditLogEntry,
   CreateVlanCommand, AddPortToVlanCommand, RemovePortFromVlanCommand, ConfigurePortCommand,
-  SetVlanIpCommand,
+  SetVlanIpCommand, FirmwareFileInfo, FirmwareUploadResult, FirmwareProgress,
 } from '@types/ipc';
 
 declare global {
@@ -44,6 +44,12 @@ declare global {
       switchSetDefaultGateway: (gateway: string) => Promise<void>;
       switchSetManagementVlan: (vlanId: number | null) => Promise<void>;
       switchSaveConfig: () => Promise<string>;
+      // Firmware
+      switchSelectFirmwareFile: () => Promise<FirmwareFileInfo | null>;
+      switchUploadFirmware: (filePath: string) => Promise<FirmwareUploadResult>;
+      switchActivateFirmwareBank: () => Promise<string>;
+      onFirmwareProgress: (cb: (p: FirmwareProgress) => void) => void;
+      removeFirmwareProgressListener: () => void;
       // Audit
       auditList: (profileId?: string) => Promise<AuditLogEntry[]>;
       auditClear: (profileId?: string) => Promise<void>;
@@ -147,7 +153,7 @@ export default function App() {
   const isMac = window.ipc?.platform === 'darwin';
 
   return (
-    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', backgroundColor: '#1f2228', userSelect: 'none' }}>
+    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', backgroundColor: '#1f2228' }}>
       {/* Header */}
       <div style={{
         borderBottom: '1px solid rgba(255,255,255,0.1)',

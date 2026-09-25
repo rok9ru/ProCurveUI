@@ -1,0 +1,26 @@
+[
+  {
+    "modelPattern": "J9279A|2510G-24",
+    "family": "ProVision, Y-branch (2510G-24)",
+    "webUi": "java-applet",
+    "webUiAuth": "basic",
+    "tested": true,
+    "notes": "Top tab bar is a Java applet (agent.jar, PageSelector.class) — won't load without Java. There's a direct CGI API (/cgi/getVLANAll, /cgi/addVLAN, /cgi/get_bobports, etc.) — requires Basic Auth on /classes/agent.jar and /cgi/*."
+  },
+  {
+    "modelPattern": "J9020A|2510-48",
+    "family": "ProVision, U-branch (2510-48)",
+    "webUi": "java-applet",
+    "webUiAuth": "session-cookie",
+    "tested": true,
+    "notes": "Same Java applet and CGI API as the 2510G-24, but different auth: needs a session cookie (hit / before /classes/agent.jar and /cgi/*) — no Basic Auth required."
+  },
+  {
+    "modelPattern": "J9782A|2530-24",
+    "family": "ProVision, Aruba-branded YB-branch (2530-24)",
+    "webUi": "modern",
+    "webUiAuth": "unknown",
+    "tested": true,
+    "notes": "Directly observed to have a normal modern web UI, no Java required. Haven't tested its CGI API (/cgi/*) directly."
+  }
+]

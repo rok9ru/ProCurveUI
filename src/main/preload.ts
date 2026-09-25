@@ -41,6 +41,14 @@ contextBridge.exposeInMainWorld('ipc', {
   switchSetManagementVlan: (vlanId: number | null) => ipcRenderer.invoke('switch:setManagementVlan', vlanId),
   switchSaveConfig: () => ipcRenderer.invoke('switch:saveConfig'),
 
+  // Firmware
+  switchSelectFirmwareFile: () => ipcRenderer.invoke('switch:selectFirmwareFile'),
+  switchUploadFirmware: (filePath: string) => ipcRenderer.invoke('switch:uploadFirmware', { filePath }),
+  switchActivateFirmwareBank: () => ipcRenderer.invoke('switch:activateFirmwareBank'),
+  onFirmwareProgress: (cb: (p: { block: number; totalBlocks: number; bytesSent: number; totalBytes: number }) => void) =>
+    ipcRenderer.on('firmware:progress', (_e, p) => cb(p)),
+  removeFirmwareProgressListener: () => ipcRenderer.removeAllListeners('firmware:progress'),
+
   // Audit
   auditList: (profileId?: string) => ipcRenderer.invoke('audit:list', profileId),
   auditClear: (profileId?: string) => ipcRenderer.invoke('audit:clear', profileId),

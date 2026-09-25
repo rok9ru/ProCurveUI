@@ -12,12 +12,27 @@ export class SSHClient extends EventEmitter {
   // Matches ProCurve prompts: "Switch-name> ", "Switch-name# ", "Switch-name(config)# ", etc.
   private promptRegex: RegExp = /[>#]\s*$/;
   private paginationRegex: RegExp = /-- MORE --/i;
+  // Some config-mode commands ask a y/n confirmation before applying (e.g.
+  // `no vlan <id>` when the VLAN still has port members: "The following
+  // ports will be moved to the default VLAN... Do you want to continue?
+  // [y/n]"; a reboot: "...continue [y/n]?"). Neither form ends in ">"/"#",
+  // so promptRegex never matches and the command just hangs until timeout.
+  // Auto-answering "y" is safe here: every caller reaching this point is
+  // already applying a change the user explicitly requested through the UI.
+  private confirmRegex: RegExp = /[[(]y\/n[\])]\??\s*$/i;
   // Serialize all execute() calls — SSH shell is a single stream, no concurrent commands
   private execQueue: Array<() => void> = [];
   private execRunning: boolean = false;
   // Login banner (e.g. "ProCurve J9279A Switch 2510G-24") — the only place the
   // real hardware model appears; `show system`/`show version` never print it.
   private banner: string = '';
+  // Without this, an idle session gets dropped by the switch's own inactivity
+  // timeout. Goes through execute() (not a raw stream.write) so it's queued
+  // behind whatever real command is currently running instead of racing it —
+  // a keep-alive byte landing mid-command would corrupt that command's output
+  // parsing in _executeNow().
+  private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+  private keepAliveIntervalMs: number = 60000;
 
   private stripAnsi(str: string): string {
     // Must consume the leading ESC (0x1B) itself, not just the "[...letter"
@@ -46,6 +61,7 @@ export class SSHClient extends EventEmitter {
           } catch {
             // pagination might not be disableable; handle manually
           }
+          this.startKeepAlive();
           resolve();
         } catch (err) {
           this.client?.end();
@@ -61,6 +77,7 @@ export class SSHClient extends EventEmitter {
       this.client.on('close', () => {
         this.isConnected = false;
         this.shellStream = null;
+        this.stopKeepAlive();
       });
 
       this.client.connect({
@@ -138,7 +155,26 @@ export class SSHClient extends EventEmitter {
     });
   }
 
+  private startKeepAlive(): void {
+    this.stopKeepAlive();
+    this.keepAliveTimer = setInterval(() => {
+      if (!this.isConnected) return;
+      this.execute('no page').catch(() => {
+        // Connection is likely already dead; the 'close'/'error' handlers
+        // deal with tearing down state, nothing more to do here.
+      });
+    }, this.keepAliveIntervalMs);
+  }
+
+  private stopKeepAlive(): void {
+    if (this.keepAliveTimer) {
+      clearInterval(this.keepAliveTimer);
+      this.keepAliveTimer = null;
+    }
+  }
+
   async disconnect(): Promise<void> {
+    this.stopKeepAlive();
     if (this.shellStream) {
       try { this.shellStream.write('exit\n'); } catch {}
       this.shellStream.end();
@@ -155,6 +191,10 @@ export class SSHClient extends EventEmitter {
 
   getBanner(): string {
     return this.banner;
+  }
+
+  getHost(): string | undefined {
+    return this.config?.host;
   }
 
   async execute(command: string, timeout: number = 20000): Promise<string> {
@@ -205,6 +245,13 @@ export class SSHClient extends EventEmitter {
           return;
         }
 
+        if (this.confirmRegex.test(buffer.trim())) {
+          this.emit('log', `[AUTO-CONFIRM] ${command}`);
+          this.shellStream!.write('y\n');
+          buffer = '';
+          return;
+        }
+
         if (this.promptRegex.test(buffer.trim())) {
           clearTimeout(timeoutId);
           this.shellStream!.removeListener('data', onData);
@@ -250,6 +297,85 @@ export class SSHClient extends EventEmitter {
     }
     try { await this.execute('end', 5000); } catch {}
     return results.join('\n');
+  }
+
+  // `boot system flash <bank>` never returns to a normal prompt — the switch
+  // reboots mid-command, so the usual "wait for promptRegex" resolution in
+  // _executeNow() would just hang until its timeout. Resolves as soon as the
+  // switch prints its reboot banner (confirmed wording, verified live this
+  // session), or if the connection drops/errors first — that's the expected
+  // outcome once a reboot is underway, not a failure. Still goes through the
+  // same execRunning/execQueue serialization as execute() so it can't race
+  // the keep-alive timer or another queued command.
+  async bootFromFlash(bank: 'primary' | 'secondary', timeoutMs: number = 30000): Promise<string> {
+    if (!this.isConnected || !this.shellStream) {
+      throw new Error('SSH client not connected');
+    }
+    return new Promise((resolve, reject) => {
+      const run = () => {
+        this.execRunning = true;
+        this._bootFromFlashNow(bank, timeoutMs).then(
+          (result) => { this.execRunning = false; this._drainQueue(); resolve(result); },
+          (err)    => { this.execRunning = false; this._drainQueue(); reject(err); }
+        );
+      };
+      if (this.execRunning) {
+        this.execQueue.push(run);
+      } else {
+        run();
+      }
+    });
+  }
+
+  private _bootFromFlashNow(bank: 'primary' | 'secondary', timeoutMs: number): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const rebootRegex = /Rebooting the System/i;
+      let buffer = '';
+      let fullOutput = '';
+      let done = false;
+
+      const finish = (ok: boolean, result: string | Error) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timeoutId);
+        this.shellStream?.removeListener('data', onData);
+        this.shellStream?.removeListener('close', onClose);
+        this.shellStream?.removeListener('error', onStreamError);
+        if (ok) resolve(result as string); else reject(result as Error);
+      };
+
+      const timeoutId = setTimeout(() => {
+        finish(false, new Error(`Boot command timed out after ${timeoutMs}ms: no reboot banner and connection still up`));
+      }, timeoutMs);
+
+      const onData = (data: Buffer) => {
+        const chunk = this.stripAnsi(data.toString());
+        this.emit('log', `[DATA] ${chunk}`);
+        buffer += chunk;
+        fullOutput += chunk;
+
+        if (this.confirmRegex.test(buffer.trim())) {
+          this.emit('log', `[AUTO-CONFIRM] boot system flash ${bank}`);
+          this.shellStream!.write('y\n');
+          buffer = '';
+          return;
+        }
+        if (rebootRegex.test(fullOutput)) {
+          finish(true, fullOutput);
+        }
+      };
+      // A dropped connection is the expected outcome once the reboot actually
+      // starts, not an error — treat it the same as seeing the reboot banner.
+      const onClose = () => finish(true, fullOutput);
+      const onStreamError = () => finish(true, fullOutput);
+
+      this.shellStream!.on('data', onData);
+      this.shellStream!.once('close', onClose);
+      this.shellStream!.once('error', onStreamError);
+      const cmd = `boot system flash ${bank}`;
+      this.emit('log', `[SEND] ${cmd}`);
+      this.shellStream!.write(cmd + '\n');
+    });
   }
 }
 

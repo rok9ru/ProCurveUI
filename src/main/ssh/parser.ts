@@ -1,4 +1,4 @@
-import type { SystemInfo, Vlan, Port } from '../../types/ipc.js';
+import type { SystemInfo, Vlan, Port, FlashInfo } from '../../types/ipc.js';
 
 export class ProCurveParser {
 
@@ -103,14 +103,24 @@ export class ProCurveParser {
         const m = line.match(new RegExp(`${key}\\s*:\\s*(.+)$`));
         return m ? m[1].trim() : null;
       };
+      // `show system-information` packs two "Label : value" columns onto one
+      // physical line for several fields (e.g. "Software revision : U.11.67
+      // Base MAC Addr : ..."). A greedy (.+)$ capture for the first column
+      // swallows the second column's label+value too, so short token-like
+      // values (versions, serials, MACs — never contain internal spaces)
+      // must stop at the first run of 2+ spaces instead of at end of line.
+      const kvShort = (key: string) => {
+        const m = line.match(new RegExp(`${key}\\s*:\\s*(.+?)(?:\\s{2,}|$)`));
+        return m ? m[1].trim() : null;
+      };
 
       if (/System Name/i.test(line)) info.systemName = kv('System Name') ?? undefined;
       if (/System Contact/i.test(line)) info.systemContact = kv('System Contact') ?? undefined;
       if (/System Location/i.test(line)) info.systemLocation = kv('System Location') ?? undefined;
-      if (/Software revision/i.test(line)) info.firmwareVersion = kv('Software revision') ?? undefined;
-      if (/ROM Version/i.test(line) && !info.romVersion) info.romVersion = kv('ROM Version') ?? undefined;
-      if (/Serial Number/i.test(line)) info.serialNumber = kv('Serial Number') ?? undefined;
-      if (/MAC Addr/i.test(line)) info.macAddress = kv('MAC Addr') ?? undefined;
+      if (/Software revision/i.test(line)) info.firmwareVersion = kvShort('Software revision') ?? undefined;
+      if (/ROM Version/i.test(line) && !info.romVersion) info.romVersion = kvShort('ROM Version') ?? undefined;
+      if (/Serial Number/i.test(line)) info.serialNumber = kvShort('Serial Number') ?? undefined;
+      if (/MAC Addr/i.test(line)) info.macAddress = kvShort('MAC Addr') ?? undefined;
       if (/Up Time/i.test(line)) {
         const m = line.match(/Up Time\s*:\s*(.+?)(?:\s{2,}|$)/);
         if (m) info.systemUptime = m[1].trim();
@@ -149,6 +159,29 @@ export class ProCurveParser {
       memoryUsagePercent: info.memoryUsagePercent || 0,
       cpuUsagePercent: info.cpuUsagePercent,
       ports: info.ports || { total: 48, active: 0, inactive: 0 },
+    };
+  }
+
+  // Parses `show flash`:
+  //   Image           Size(Bytes)   Date   Version
+  //   -----           ----------  -------- -------
+  //   Primary Image   : 3434560   12/19/08 U.11.11
+  //   Secondary Image : 3573695   12/07/20 U.11.67
+  //   Boot Rom Version: R.10.06
+  //   Current Boot    : Primary
+  static parseFlashInfo(output: string): FlashInfo | undefined {
+    const primary = output.match(/Primary Image\s*:\s*(\d+)\s+(\S+)\s+(\S+)/i);
+    const secondary = output.match(/Secondary Image\s*:\s*(\d+)\s+(\S+)\s+(\S+)/i);
+    const bootRom = output.match(/Boot Rom Version\s*:\s*(\S+)/i);
+    const currentBoot = output.match(/Current Boot\s*:\s*(Primary|Secondary)/i);
+
+    if (!primary || !secondary || !currentBoot) return undefined;
+
+    return {
+      primary: { sizeBytes: parseInt(primary[1], 10), date: primary[2], version: primary[3] },
+      secondary: { sizeBytes: parseInt(secondary[1], 10), date: secondary[2], version: secondary[3] },
+      bootRomVersion: bootRom?.[1],
+      currentBoot: currentBoot[1] as 'Primary' | 'Secondary',
     };
   }
 

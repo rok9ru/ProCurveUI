@@ -1,6 +1,6 @@
 {
   "name": "procurve-manager",
-  "version": "1.0.0",
+  "version": "2.1.0",
   "description": "Professional GUI for managing HP ProCurve switches",
   "author": {
     "name": "syrex1013",
@@ -15,7 +15,7 @@
     "dev:electron": "sleep 3 && electron .",
     "build": "npm run build:vite && npm run build:main",
     "build:vite": "vite build",
-    "build:main": "tsc --project tsconfig.json && tsc --project tsconfig.preload.json",
+    "build:main": "tsc --project tsconfig.json && tsc --project tsconfig.preload.json && node -e \"require('fs').copyFileSync('src/main/switchCatalog.json','dist/main/switchCatalog.json')\"",
     "type-check": "tsc --noEmit",
     "preview": "vite preview",
     "package": "npm run build && electron-builder",
@@ -51,7 +51,6 @@
     "electron-is-dev": "^3.0.1",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
-    "sql.js": "^1.14.1",
     "ssh2": "1.15.0"
   },
   "build": {
@@ -59,7 +58,6 @@
     "productName": "ProCurve Manager",
     "files": [
       "dist/**/*",
-      "node_modules/**/*",
       "assets/**/*"
     ],
     "directories": {

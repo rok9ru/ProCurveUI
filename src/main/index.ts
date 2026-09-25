@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, dialog } from 'electron';
 
 // Prevent renderer DevTools from opening
 try { app.commandLine.appendSwitch('disable-dev-tools'); } catch (e) { /* ignore */ }
@@ -26,6 +26,10 @@ import isDev from 'electron-is-dev';
 import SSHClient from './ssh/client.js';
 import ProCurveParser from './ssh/parser.js';
 import DatabaseManager from './database/db.js';
+import { matchSwitchCatalog } from './switchCatalog.js';
+import { getLocalAddressFor } from './network.js';
+import TftpServer from './tftpServer.js';
+import fs from 'fs';
 import type {
   SSHProfile, SystemInfo, Vlan, Port, AuditLogEntry,
   CreateVlanCommand, ModifyVlanCommand, AddPortToVlanCommand,
@@ -215,6 +219,15 @@ ipcMain.handle('switch:getSystemInfo', async () => {
   } catch (e) {
     // Keep base info usable if running-config lookup fails.
   }
+
+  try {
+    const flashOutput = await sshClient.execute('show flash');
+    info.flash = ProCurveParser.parseFlashInfo(flashOutput);
+  } catch (e) {
+    // Keep base info usable if flash lookup fails.
+  }
+
+  info.catalog = matchSwitchCatalog(info.model);
 
   if (currentProfile) db?.addAuditEntry(currentProfile.id, 'show system', JSON.stringify(info), true);
   return info;
@@ -450,6 +463,70 @@ ipcMain.handle('switch:saveConfig', async () => {
   const result = await sshClient.execute('write memory');
   if (currentProfile)
     db?.addAuditEntry(currentProfile.id, 'write memory', result, true);
+  return result;
+});
+
+// ── Firmware ──────────────────────────────────────────────────────────────────
+// Always targets the secondary flash bank — never primary. That's not a
+// configurable option here: the whole point of the primary/secondary split
+// is that a botched upload leaves the switch still bootable from primary,
+// and this app has no business overwriting the one copy that's guaranteed
+// to still work.
+
+ipcMain.handle('switch:selectFirmwareFile', async () => {
+  if (!mainWindow) return null;
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select firmware image (.swi)',
+    filters: [
+      { name: 'Switch firmware', extensions: ['swi'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+    properties: ['openFile'],
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  const filePath = result.filePaths[0];
+  const stat = fs.statSync(filePath);
+  return { path: filePath, name: path.basename(filePath), size: stat.size };
+});
+
+ipcMain.handle('switch:uploadFirmware', async (_event, { filePath }: { filePath: string }) => {
+  if (!sshClient) throw new Error('SSH not connected');
+  const host = sshClient.getHost();
+  if (!host) throw new Error('No active switch connection');
+  if (!fs.existsSync(filePath)) throw new Error(`File not found: ${filePath}`);
+
+  const filename = path.basename(filePath);
+  const localIp = await getLocalAddressFor(host);
+
+  const tftp = new TftpServer(filePath);
+  tftp.on('log', (line: string) => mainWindow?.webContents.send('ssh:log', `[TFTP] ${line}`));
+  tftp.on('progress', (p) => mainWindow?.webContents.send('firmware:progress', p));
+  tftp.on('error', (err: Error) => mainWindow?.webContents.send('ssh:log', `[TFTP] error: ${err.message}`));
+
+  await tftp.start(localIp);
+  try {
+    const result = await sshClient.execute(
+      `copy tftp flash ${localIp} ${filename} secondary`,
+      20 * 60 * 1000 // large images over a slow link can genuinely take minutes
+    );
+
+    const flashOutput = await sshClient.execute('show flash');
+    const flash = ProCurveParser.parseFlashInfo(flashOutput);
+
+    if (currentProfile)
+      db?.addAuditEntry(currentProfile.id, `copy tftp flash secondary (${filename})`, result, true);
+
+    return { output: result, flash };
+  } finally {
+    tftp.stop();
+  }
+});
+
+ipcMain.handle('switch:activateFirmwareBank', async () => {
+  if (!sshClient) throw new Error('SSH not connected');
+  const result = await sshClient.bootFromFlash('secondary');
+  if (currentProfile)
+    db?.addAuditEntry(currentProfile.id, 'boot system flash secondary', result, true);
   return result;
 });
 

@@ -11,6 +11,49 @@ export interface SSHProfile {
   updatedAt: Date;
 }
 
+export interface FlashImageInfo {
+  version: string;
+  date?: string;
+  sizeBytes?: number;
+}
+
+export interface FlashInfo {
+  primary: FlashImageInfo;
+  secondary: FlashImageInfo;
+  bootRomVersion?: string;
+  currentBoot: 'Primary' | 'Secondary';
+}
+
+export interface FirmwareFileInfo {
+  path: string;
+  name: string;
+  size: number;
+}
+
+export interface FirmwareUploadResult {
+  output: string;
+  flash?: FlashInfo;
+}
+
+export interface FirmwareProgress {
+  block: number;
+  totalBlocks: number;
+  bytesSent: number;
+  totalBytes: number;
+}
+
+// Local reference data (src/main/switchCatalog.json) about specific
+// switch models/firmware combinations we've actually verified live —
+// not a general compatibility claim for a whole product line.
+export interface SwitchCatalogEntry {
+  modelPattern: string;
+  family: string;
+  webUi: 'modern' | 'java-applet' | 'unknown';
+  webUiAuth?: 'basic' | 'session-cookie' | 'unknown';
+  tested: boolean;
+  notes?: string;
+}
+
 export interface SystemInfo {
   model: string;
   firmwareVersion: string;
@@ -28,6 +71,8 @@ export interface SystemInfo {
   ports: { total: number; active: number; inactive: number };
   defaultGateway?: string;
   managementVlan?: number;
+  flash?: FlashInfo;
+  catalog?: SwitchCatalogEntry;
 }
 
 export interface Vlan {
